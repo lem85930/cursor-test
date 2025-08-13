@@ -5,7 +5,7 @@
 Retaining wall cross-section generator.
 
 - Supports four types: 仰斜式、直立式、俯斜式、衡重式
-- Inputs parameters: H, b, m1, bj, hj, hn, Bd, n, m2, bt, h1, h2
+- Inputs parameters: H, b, m1, bj, hj, hn, Bd, n, m2, m3, bt, h1, h2
 - Produces a 2D closed polyline at 1:1 scale in DXF format, and
   will attempt to convert to DWF if a supported converter is detected.
 
@@ -16,8 +16,9 @@ Notes on geometry conventions used here
 - "1:m" for faces is interpreted as vertical:horizontal; when moving up by Δy,
   X shifts to the left by m*Δy (leaning towards negative X).
 - Top width b connects the free face top-left to the back face top-right.
-- For 衡重式, lower back slope is fixed to 1:0.25, the upper back slope is 1:m2,
-  with an intermediate platform width bt, heights h2 (lower) and h1 (upper),
+- For 非衡重式: back-face slope is 1:m2.
+- For 衡重式: upper back slope is 1:m2, lower back slope is 1:m3, with an
+  intermediate platform width bt, heights h1 (upper) and h2 (lower),
   where H ≈ h1 + h2. If not, the script adjusts h2 to H - h1.
 
 Important
@@ -29,9 +30,9 @@ Important
 Run
 - Interactive: python generate_retaining_wall.py
 - Non-interactive: provide CLI args, e.g.
-  python generate_retaining_wall.py --type 直立式 --H 6 --b 0.8 --m1 0.3 \
-    --bj 0.4 --hj 0.3 --hn 0.2 --Bd 3.5 --n 8 --m2 0.2 --bt 0.5 --h1 3 --h2 3 \
-    --out /workspace/output
+  python generate_retaining_wall.py --type 2 --H 6 --b 0.8 --m1 0.3 \
+    --bj 0.4 --hj 0.3 --hn 0.2 --Bd 3.5 --n 8 --m2 0.2 --m3 0.25 \
+    --bt 0.5 --h1 3 --h2 3 --out /workspace/output
 """
 
 from __future__ import annotations
@@ -65,21 +66,13 @@ class WallParams:
     Bd: float
     n: float
     m2: float
+    m3: float
     bt: float
     h1: float
     h2: float
 
 
 WALL_TYPES = ["仰斜式", "直立式", "俯斜式", "衡重式"]
-
-# Back-face slopes for non-gravity walls (1:mb)
-NON_GRAVITY_BACK_SLOPE = {
-    "仰斜式": 0.25,
-    "直立式": 0.0,
-    "俯斜式": 0.05,
-}
-
-LOWER_BACK_SLOPE_HENGZHONG = 0.25  # fixed 1:0.25 for lower back in gravity type
 
 
 def _safe_float(value: str, default: float = 0.0) -> float:
@@ -89,12 +82,23 @@ def _safe_float(value: str, default: float = 0.0) -> float:
         return default
 
 
+def _normalize_wall_type(token: str) -> str:
+    token = token.strip()
+    if token.isdigit():
+        idx = int(token)
+        if 1 <= idx <= len(WALL_TYPES):
+            return WALL_TYPES[idx - 1]
+    if token in WALL_TYPES:
+        return token
+    # Fallback
+    return "直立式"
+
+
 def prompt_interactive() -> Tuple[str, WallParams, str]:
-    print("请选择挡墙类型：仰斜式 / 直立式 / 俯斜式 / 衡重式")
-    wall_type = input("类型: ").strip()
-    if wall_type not in WALL_TYPES:
-        print(f"未识别的类型，默认使用 直立式")
-        wall_type = "直立式"
+    print("请选择挡墙类型（输入序号）：")
+    for i, name in enumerate(WALL_TYPES, start=1):
+        print(f"  {i}. {name}")
+    wall_type = _normalize_wall_type(input("类型序号[1-4]: "))
 
     # Unit note
     print("注意：所有输入均使用同一长度单位（例如 m 或 mm），脚本按 1:1 输出，不做单位换算。")
@@ -110,14 +114,15 @@ def prompt_interactive() -> Tuple[str, WallParams, str]:
     hn = ask("hn 墙踵底与墙趾底高差")
     Bd = ask("Bd 墙底总宽")
     n = ask("n 墙底底面斜率(n:1)中的 n")
-    m2 = ask("m2 衡重式上阶墙背斜率(1:m2)，非衡重式可填0")
+    m2 = ask("m2 挡土侧墙背斜率(1:m2)；衡重式为上阶")
+    m3 = ask("m3 衡重式下阶墙背斜率(1:m3)，非衡重式可填0")
     bt = ask("bt 衡重式上阶平台宽度，非衡重式可填0")
     h1 = ask("h1 衡重式上阶高度，非衡重式可填0")
     h2 = ask("h2 衡重式下阶高度，非衡重式可填0")
 
     out_dir = input("输出目录(回车默认 /workspace/output): ").strip() or "/workspace/output"
 
-    return wall_type, WallParams(H, b, m1, bj, hj, hn, Bd, n, m2, bt, h1, h2), out_dir
+    return wall_type, WallParams(H, b, m1, bj, hj, hn, Bd, n, m2, m3, bt, h1, h2), out_dir
 
 
 def build_outline_points(wall_type: str, p: WallParams) -> Tuple[List[Point], float]:
@@ -140,13 +145,13 @@ def build_outline_points(wall_type: str, p: WallParams) -> Tuple[List[Point], fl
         # Compute required heel bottom X so that back-face segments close
         x_after_upper = x_top_right + p.m2 * p.h1  # descending along upper slope
         x_after_platform = x_after_upper + p.bt
-        bd_required = x_after_platform + LOWER_BACK_SLOPE_HENGZHONG * p.h2
+        bd_required = x_after_platform + p.m3 * p.h2
         Bd_adj = bd_required
 
         # Bottom and back-face points
         a = (0.0, 0.0)
         btm = (Bd_adj, p.hn)
-        lower_top = (Bd_adj - LOWER_BACK_SLOPE_HENGZHONG * p.h2, p.hn + p.h2)
+        lower_top = (Bd_adj - p.m3 * p.h2, p.hn + p.h2)
         step_inner = (lower_top[0] - p.bt, lower_top[1])
         back_top = (x_top_right, y_top)
         free_top_left = (x_top_left, y_top)
@@ -156,9 +161,8 @@ def build_outline_points(wall_type: str, p: WallParams) -> Tuple[List[Point], fl
         points: List[Point] = [a, btm, lower_top, step_inner, back_top, free_top_left, toe_top_right, toe_top_left]
         return points, Bd_adj
 
-    # Non-gravity types: determine required Bd from back slope and top-right
-    mb = NON_GRAVITY_BACK_SLOPE.get(wall_type, 0.0)
-    Bd_adj = x_top_right + mb * p.H
+    # Non-gravity types: determine required Bd from back slope m2 and top-right
+    Bd_adj = x_top_right + p.m2 * p.H
 
     a = (0.0, 0.0)
     btm = (Bd_adj, p.hn)
@@ -243,7 +247,7 @@ def try_convert_to_dwf(dxf_path: str, dwf_path: str) -> bool:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate retaining wall cross-section (DXF/DWF)")
-    parser.add_argument("--type", dest="wall_type", choices=WALL_TYPES, help="挡墙类型")
+    parser.add_argument("--type", dest="wall_type", help="挡墙类型，可输入序号1-4或中文名称")
     parser.add_argument("--H", type=float, help="挡墙总高")
     parser.add_argument("--b", type=float, help="墙顶宽度")
     parser.add_argument("--m1", type=float, help="临空面斜率(1:m1)")
@@ -252,7 +256,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--hn", type=float, help="踵底与趾底高差")
     parser.add_argument("--Bd", type=float, help="墙底总宽")
     parser.add_argument("--n", type=float, default=0.0, help="底面斜率 n:1 中的 n（仅用于记录）")
-    parser.add_argument("--m2", type=float, default=0.0, help="衡重式上阶斜率(1:m2)")
+    parser.add_argument("--m2", type=float, default=0.0, help="挡土侧墙背斜率(1:m2)；衡重式为上阶")
+    parser.add_argument("--m3", type=float, default=0.0, help="衡重式下阶墙背斜率(1:m3)")
     parser.add_argument("--bt", type=float, default=0.0, help="衡重式上阶平台宽度")
     parser.add_argument("--h1", type=float, default=0.0, help="衡重式上阶高度")
     parser.add_argument("--h2", type=float, default=0.0, help="衡重式下阶高度")
@@ -274,7 +279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("参数不全，改用交互式输入。\n")
             wall_type, params, out_dir = prompt_interactive()
         else:
-            wall_type = ns.wall_type
+            wall_type = _normalize_wall_type(str(ns.wall_type))
             params = WallParams(
                 ns.H,
                 ns.b,
@@ -285,6 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ns.Bd,
                 ns.n,
                 ns.m2,
+                ns.m3,
                 ns.bt,
                 ns.h1,
                 ns.h2,
